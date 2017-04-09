@@ -8,5 +8,5 @@ config_vars:
   PATH: /app/local/bin:/app/vendor/bin:/usr/local/bin:/usr/bin:/bin
   PERL5LIB: /app/local/lib/perl5:/app/vendor/lib/perl5
 default_process_types:
-  web: perl ./script/bot
+  web: carton exec -- perl ./script/bot
 EOF
