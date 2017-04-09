@@ -1,47 +1,47 @@
-#!/usr/bin/env bash
-# Usage:
-#
-#     $ bin/compile <build-dir> <cache-dir> <env-path>
-
-# Fail fast and fail hard.
-set -eo pipefail
+#!/bin/bash
 
 indent() {
   sed -u 's/^/       /'
 }
+cat_build_log() {
+  local build_log=$HOME/.cpanm/build.log
+  echo # empty line
+  echo ----- dumping $build_log ----- | indent
+  cat $build_log | indent
+}
 
 BUILD_DIR=$1
 CACHE_DIR=$2
-ENV_DIR=$3
 
-PATH="$BUILD_DIR/local/bin:$PATH"
+INSTALL_URL=https://git.io/perl-install
 
-export PERL5LIB="$BUILD_DIR/local/lib/perl5"
+RELEASE_VERSION=`curl -sSkL $INSTALL_URL | bash -s - --print-version`
 
-PERL_CPANM_OPT="--quiet --notest -l $BUILD_DIR/local"
-if [ -f $ENV_DIR/PERL_CPANM_OPT ]; then
-  PERL_CPANM_OPT="$PERL_CPANM_OPT $(cat $ENV_DIR/PERL_CPANM_OPT)"
+rm -rf $BUILD_DIR/vendor
+if [ -d $CACHE_DIR/vendor-$RELEASE_VERSION ]; then
+  echo "-----> Vendoring Perl (using cache)"
+  cp -a $CACHE_DIR/vendor-$RELEASE_VERSION $BUILD_DIR/vendor
+else
+  echo "-----> Vendoring Perl"
+  mkdir -p $BUILD_DIR/vendor
+  curl -sSkL $INSTALL_URL | bash -s $BUILD_DIR/vendor
 fi
-export PERL_CPANM_OPT
 
-rm -rf $BUILD_DIR/local
-if [ -d $CACHE_DIR/local ]; then
-  cp -a $CACHE_DIR/local $BUILD_DIR/local
-fi
+export PATH="$BUILD_DIR/vendor/bin:$PATH"
+
+echo "Using perl `perl -e 'print $^V'`" | indent
 
 cd $BUILD_DIR
 
-if ! [ -e $BUILD_DIR/local/bin/cpanm ]; then
-  echo "-----> Bootstrapping cpanm"
-  curl -L --silent https://raw.github.com/miyagawa/cpanminus/master/cpanm | perl - App::cpanminus 2>&1 | indent
-fi
-
 echo "-----> Installing dependencies"
-echo "cpanm options: $PERL_CPANM_OPT" | indent
-cpanm --installdeps . 2>&1 | indent
+cpanm -nq --installdeps . 2>&1 | indent
+if [ ${PIPESTATUS[0]} -ne 0 ]; then cat_build_log; exit 1; fi
 
-if [ -d $BUILD_DIR/local ]; then
-  rm -rf $CACHE_DIR/local
+echo "-----> Changing shebang lines"
+change-shebang -f $BUILD_DIR/vendor/bin/* 2>&1 | indent
+
+if [ -d $BUILD_DIR/vendor ]; then
+  rm -rf $CACHE_DIR/vendor-$RELEASE_VERSION
   mkdir -p $CACHE_DIR
-  cp -a $BUILD_DIR/local $CACHE_DIR/local
+  cp -a $BUILD_DIR/vendor $CACHE_DIR/vendor-$RELEASE_VERSION
 fi
