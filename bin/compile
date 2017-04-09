@@ -34,7 +34,7 @@ echo "Using perl `perl -e 'print $^V'`" | indent
 cd $BUILD_DIR
 
 echo "-----> Installing dependencies"
-cpanm -nq --installdeps . 2>&1 | indent
+cpanm --installdeps . 2>&1 | indent
 if [ ${PIPESTATUS[0]} -ne 0 ]; then cat_build_log; exit 1; fi
 
 echo "-----> Changing shebang lines"
