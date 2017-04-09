@@ -1,47 +1,105 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-indent() {
-  sed -u 's/^/       /'
-}
-cat_build_log() {
-  local build_log=$HOME/.cpanm/build.log
-  echo # empty line
-  echo ----- dumping $build_log ----- | indent
-  cat $build_log | indent
-}
+set -e            # fail fast
+set -o pipefail   # don't ignore exit codes when piping output
 
 BUILD_DIR=$1
 CACHE_DIR=$2
+ENV_DIR=$3
+BP_DIR=$(cd $(dirname $0); cd ..; pwd)
 
-INSTALL_URL=https://git.io/perl-install
+source $BP_DIR/bin/common.sh
+trap cat_cpanm_build_log ERR
+mkdir -p $BUILD_DIR/.profile.d
 
-RELEASE_VERSION=`curl -sSkL $INSTALL_URL | bash -s - --print-version`
-
-rm -rf $BUILD_DIR/vendor
-if [ -d $CACHE_DIR/vendor-$RELEASE_VERSION ]; then
-  echo "-----> Vendoring Perl (using cache)"
-  cp -a $CACHE_DIR/vendor-$RELEASE_VERSION $BUILD_DIR/vendor
+export_env_dir $ENV_DIR '^BUILDPACK_' ''
+if [ -e "$BUILD_DIR/.perl-version" ]; then
+    PERL_VERSION=`cat "$BUILD_DIR/.perl-version"`
+fi
+if [ -n "$STACK" ] && [ "$STACK" != "cedar" ]; then
+    CACHE_DIR="$CACHE_DIR/perl/$STACK"
+    PERL_VERSION=${PERL_VERSION-'5.22.0'}
 else
-  echo "-----> Vendoring Perl"
-  mkdir -p $BUILD_DIR/vendor
-  curl -sSkL $INSTALL_URL | bash -s $BUILD_DIR/vendor
+    CACHE_DIR="$CACHE_DIR/perl"
+    PERL_VERSION=${PERL_VERSION-'5.20.1'}
+fi
+PERL_VERSION=${BUILDPACK_PERL_VERSION-$PERL_VERSION}
+PERL_LIBS=${BUILDPACK_PERL_LIBS-'extras'}
+PERL_URL=${BUILDPACK_PERL_URL:-"https://heroku-buildpack-perl.s3.amazonaws.com/$STACK"}
+CPANM_URL=${BUILDPACK_CPANM_URL:-"${PERL_URL%/}/cpanm"}
+CPANM_OPT=${BUILDPACK_CPANM_OPT-"--quiet --notest"}
+if [ -n "$BUILDPACK_CPAN_MIRROR" ]; then
+  status "Using CPAN mirror $BUILDPACK_CPAN_MIRROR"
+  CPANM_OPT="$CPANM_OPT --mirror-only --mirror '$BUILDPACK_CPAN_MIRROR'"
+fi
+export PERL_CPANM_OPT=$CPANM_OPT
+
+if [ -n "$PERL_VERSION" ] && [ "$PERL_VERSION" != "system" ]; then
+    PERL_PACKAGE="${PERL_URL%/}/perl-$PERL_VERSION.tgz"
+    status "Vendoring $PERL_PACKAGE"
+    mkdir -p "$BUILD_DIR/vendor/perl"
+    curl -sL $PERL_PACKAGE | tar xzf - -C "$BUILD_DIR/vendor/perl" &> /dev/null
+    export PATH="$BUILD_DIR/vendor/perl/bin:$PATH"
+    echo "export PATH=\"\$HOME/vendor/perl/bin:\$PATH\";" > $BUILD_DIR/.profile.d/buildpack_vendor_perl.sh
+    for package in $PERL_LIBS; do
+        PERL_PACKAGE="${PERL_URL%/}/perl-$PERL_VERSION-$package.tgz"
+        status "Vendoring $PERL_PACKAGE"
+        curl -sL $PERL_PACKAGE | tar xzf - -C "$BUILD_DIR/vendor/perl" &> /dev/null
+    done
 fi
 
-export PATH="$BUILD_DIR/vendor/bin:$PATH"
-
-echo "Using perl `perl -e 'print $^V'`" | indent
+CURRENT_PERL_VERSION=$( eval $(perl -V:PERL_.*:); echo "$PERL_REVISION.$PERL_VERSION.$PERL_SUBVERSION" )
+status "Current perl version is $CURRENT_PERL_VERSION"
 
 cd $BUILD_DIR
 
-echo "-----> Installing dependencies"
-cpanm -nq --installdeps . 2>&1 | indent
-if [ ${PIPESTATUS[0]} -ne 0 ]; then cat_build_log; exit 1; fi
-
-echo "-----> Changing shebang lines"
-change-shebang -f $BUILD_DIR/vendor/bin/* 2>&1 | indent
-
-if [ -d $BUILD_DIR/vendor ]; then
-  rm -rf $CACHE_DIR/vendor-$RELEASE_VERSION
-  mkdir -p $CACHE_DIR
-  cp -a $BUILD_DIR/vendor $CACHE_DIR/vendor-$RELEASE_VERSION
+if [ `which sha256sum` ]; then
+    RELEASE_UUID=`dd if=/dev/urandom bs=1k count=1k 2>/dev/null | sha256sum -b | cut -f1 -d' '`
+    echo "export RELEASE_UUID=\"$RELEASE_UUID\";" > $BUILD_DIR/.profile.d/buildpack_release_uuid.sh
+    status "Random RELEASE_UUID=$RELEASE_UUID"
 fi
+
+source $BP_DIR/bin/steps/hooks/pre_compile $ENV_DIR
+
+if [ -d "$CACHE_DIR/local" ]; then
+  if [ -f "$CACHE_DIR/.perl-version" ] && [ $(cat $CACHE_DIR/.perl-version) != "$CURRENT_PERL_VERSION" ]; then
+    status "Perl version changed, not restoring local directory from cache"
+  else
+    status "Restoring local directory from cache $CACHE_DIR"
+    cp -R "$CACHE_DIR/local" . &> /dev/null || true
+  fi
+fi
+
+if [ -e "$ENV_DIR/LOCALURL" ]; then
+  LOCALURL=`cat $ENV_DIR/LOCALURL`
+  status "Extracting prebuilt dependencies from $LOCALURL"
+  mkdir -p local
+  curl -sL $LOCALURL | tar -xz -C local 2>&1 | indent
+fi
+
+status "Bootstrapping cpanm and local::lib"
+curl -sL $CPANM_URL | perl - --local-lib local App::cpanminus local::lib 2>&1 | indent
+eval $(perl -Ilocal/lib/perl5 -Mlocal::lib=local 2> /dev/null)
+
+if [ -e cpanfile.snapshot ]; then
+  if ! command -v carton >/dev/null 2>&1; then
+    status "Installing carton"
+    perl -S cpanm Carton 2>&1 | indent
+  fi
+  status "Installing dependencies (carton)"
+  perl -S carton install --deployment --cached 2>&1 | indent
+  rm -rf vendor/cache 2>&1
+fi
+
+status "Installing dependencies (cpanm)"
+perl -S cpanm --installdeps . 2>&1 | indent
+
+source $BP_DIR/bin/steps/hooks/post_compile $ENV_DIR
+
+rm -rf $CACHE_DIR &> /dev/null || true
+mkdir -p $CACHE_DIR &> /dev/null || true
+if [ -d "local" ]; then
+  status "Caching local to $CACHE_DIR/"
+  cp -R local $CACHE_DIR/
+fi
+echo $CURRENT_PERL_VERSION >$CACHE_DIR/.perl-version
