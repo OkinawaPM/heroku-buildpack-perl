@@ -5,7 +5,7 @@ cat << EOF
 addons:
 config_vars:
   PATH: /app/vendor/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-  PERL5LIB: /app/lib
+  PERL5LIB: /app/local/lib/perl5:/app/vendor/lib/perl5
 default_process_types:
   web: perl ./script/bot
 EOF
