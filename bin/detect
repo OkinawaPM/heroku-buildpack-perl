@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # this pack is valid for apps with a hello.txt in the root
-if [ -f $1/script/app.psgi ]; then
-  echo "script/app.psgi"
+if [ -f $1/script/proclet.pl ]; then
+  echo "script/proclet.pl"
   exit 0
 else
   exit 1
